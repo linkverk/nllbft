@@ -1,0 +1,118 @@
+# ══════════════════════════════════════════════════════════
+# NLLB Fine-tune: Перевод Chinese → Russian
+# ══════════════════════════════════════════════════════════
+#
+# Выбери GPU профиль:
+#   python train.py --gpu rtx4070       (по умолчанию)
+#   python train.py --gpu rtx3050
+#   python train.py --gpu cpu
+#
+# ══════════════════════════════════════════════════════════
+
+model:
+  name: "facebook/nllb-200-distilled-600M"
+  src_lang: "zho_Hans"
+  tgt_lang: "rus_Cyrl"
+
+# ═══════════════════════ GPU ПРОФИЛИ ═════════════════════
+# Выбирается через --gpu флаг. Перезаписывает training.*
+
+gpu_profiles:
+  rtx4070:
+    # RTX 4070 Super — 12 GB VRAM
+    batch_size: 8
+    gradient_accumulation: 4     # effective batch = 32
+    fp16: true
+    gradient_checkpointing: true
+    use_lora: false
+    max_src_length: 128
+    max_tgt_length: 192
+
+  rtx3050:
+    # RTX 3050 Mobile — 4 GB VRAM
+    batch_size: 2
+    gradient_accumulation: 8     # effective batch = 16
+    fp16: true
+    gradient_checkpointing: true
+    use_lora: true               # LoRA обязательно на 4 GB
+    lora_r: 8
+    lora_alpha: 16
+    lora_dropout: 0.05
+    max_src_length: 96           # короче чтобы влезло
+    max_tgt_length: 128
+
+  cpu:
+    # Без GPU (очень медленно, только для теста)
+    batch_size: 2
+    gradient_accumulation: 16
+    fp16: false
+    gradient_checkpointing: true
+    use_lora: true
+    lora_r: 8
+    lora_alpha: 16
+    max_src_length: 64
+    max_tgt_length: 96
+
+# ═══════════════════ Общие параметры обучения ═════════════
+training:
+  epochs: 3
+  learning_rate: 2.0e-5
+  warmup_ratio: 0.06
+  weight_decay: 0.01
+
+  # Дефолты (перезаписываются GPU профилем)
+  batch_size: 8
+  gradient_accumulation: 4
+  fp16: true
+  gradient_checkpointing: true
+  max_src_length: 128
+  max_tgt_length: 192
+  use_lora: false
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+
+generation:
+  num_beams: 5
+  max_length: 256
+
+# ═══════════════════════════ ДАННЫЕ ═══════════════════════
+data:
+  train_path: "data/train.jsonl"
+  eval_path: "data/eval.jsonl"
+
+  sources:
+    opus100: true
+    opensubtitles: true
+    un_corpus: true
+    tatoeba: true
+
+  limits:
+    opus100: 1000000       # 1M
+    opensubtitles: 5000000 # 5M
+    un_corpus: 5000000     # 5M
+    tatoeba: 50000
+
+  filter:
+    min_zh_len: 2
+    min_ru_len: 2
+    max_zh_len: 500
+    max_ru_len: 1000
+    dedup: true
+
+  custom_files: []
+  srt_zh_dir: ""
+  srt_ru_dir: ""
+
+  # 500K = ~2-3ч, 1M = ~5ч, 2M = ~10ч, 0 = все (~20-30ч)
+  total_limit: 0
+  eval_size: 2000
+
+evaluation:
+  eval_steps: 500
+  save_steps: 500
+  logging_steps: 100
+  metric: "chrf"
+  early_stopping_patience: 3
+
+output_dir: "output"
