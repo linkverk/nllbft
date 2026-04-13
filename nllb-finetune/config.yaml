@@ -78,12 +78,13 @@ generation:
 
 # ═══════════════════════════ ДАННЫЕ ═══════════════════════
 data:
-  train_path: "data/train.jsonl"
+  train_path: "data/train_all.jsonl"
   eval_path: "data/eval.jsonl"
+  total_limit: 5000
 
   sources:
-    opus100: false
-    opensubtitles: false
+    opus100: true
+    opensubtitles: true
     un_corpus: true
     tatoeba: false
 
