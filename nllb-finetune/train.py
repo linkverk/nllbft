@@ -30,7 +30,7 @@ import os
 import re
 import sys
 import xml.etree.ElementTree as ET
-from collections import OrderedDict
+from collections import OrderedDict, Counter
 from pathlib import Path
 
 import numpy as np
@@ -118,7 +118,7 @@ def download_opus100(limit: int = 1_000_000) -> list[dict]:
                 zh = t.get("zh", t.get("zh_cn", ""))
                 ru = t.get("ru", "")
                 if zh and ru:
-                    pairs.append({"zh": zh, "ru": ru})
+                    pairs.append({"zh": zh, "ru": ru, "src": "opus100"})
         except Exception as e:
             log.debug(f"  {ds_name}/{subset}: {e}")
             continue
@@ -162,7 +162,7 @@ def download_opensubtitles(limit: int = 5_000_000) -> list[dict]:
                 # sentence-transformers: en + non_english(ru), нет прямого zh-ru
                 # Пропускаем если нет прямой пары
                 if zh and ru and len(zh) > 2 and len(ru) > 2:
-                    pairs.append({"zh": zh, "ru": ru})
+                    pairs.append({"zh": zh, "ru": ru, "src": "opensubtitles"})
         except Exception as e:
             log.debug(f"  OpenSubtitles loader ошибка: {e}")
             continue
@@ -198,7 +198,7 @@ def download_un_corpus(limit: int = 5_000_000) -> list[dict]:
                 zh = t.get("zh", "")
                 ru = t.get("ru", "")
                 if zh and ru:
-                    pairs.append({"zh": zh, "ru": ru})
+                    pairs.append({"zh": zh, "ru": ru, "src": "un_corpus"})
         except Exception as e:
             log.debug(f"  {ds_name}/{subset}: {e}")
             continue
@@ -241,7 +241,7 @@ def download_tatoeba(limit: int = 50_000) -> list[dict]:
                     zh, ru = tgt, src
 
                 if zh and ru:
-                    pairs.append({"zh": zh, "ru": ru})
+                    pairs.append({"zh": zh, "ru": ru, "src": "tatoeba"})
         except Exception as e:
             log.debug(f"  {ds_name}/{subset}: {e}")
             continue
@@ -254,27 +254,39 @@ def download_tatoeba(limit: int = 50_000) -> list[dict]:
 # Конвертация XML / TMX / CSV / SRT
 # ═══════════════════════════════════════════════════════════
 
-def convert_file(path: str) -> list[dict]:
+def convert_file(path: str, source_label: str = "") -> list[dict]:
     """Автоопределение формата и конвертация в пары."""
     path = str(path)
     ext = Path(path).suffix.lower()
+    label = source_label or f"custom:{Path(path).name}"
 
     if ext == ".jsonl":
-        return load_jsonl(path)
+        data = load_jsonl(path)
+        for d in data:
+            d.setdefault("src", label)
+        return data
 
     if ext == ".json":
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, list):
+            for d in data:
+                d.setdefault("src", label)
             return data
         return []
 
     # Читаем начало файла для определения XML-формата
     if ext in (".xml", ".tmx", ".xliff", ".xlf"):
-        return _convert_xml(path)
+        pairs = _convert_xml(path)
+        for p in pairs:
+            p.setdefault("src", label)
+        return pairs
 
     if ext in (".csv", ".tsv"):
-        return _convert_csv(path, "\t" if ext == ".tsv" else ",")
+        pairs = _convert_csv(path, "\t" if ext == ".tsv" else ",")
+        for p in pairs:
+            p.setdefault("src", label)
+        return pairs
 
     if ext == ".srt":
         log.warning(f"  SRT нельзя конвертировать без пары. Используй --srt-zh-dir и --srt-ru-dir")
@@ -284,7 +296,10 @@ def convert_file(path: str) -> list[dict]:
     zh_path = path.replace(".ru", ".zh") if ".ru" in path else path + ".zh"
     ru_path = path.replace(".zh", ".ru") if ".zh" in path else path + ".ru"
     if Path(zh_path).exists() and Path(ru_path).exists():
-        return _convert_parallel_txt(zh_path, ru_path)
+        pairs = _convert_parallel_txt(zh_path, ru_path)
+        for p in pairs:
+            p.setdefault("src", label)
+        return pairs
 
     log.warning(f"  Неизвестный формат: {path}")
     return []
@@ -406,7 +421,7 @@ def collect_srt_pairs(zh_dir: str, ru_dir: str) -> list[dict]:
         ru_entries = {e["index"]: e["text"] for e in parse_srt(str(ru_file))}
         for idx in zh_entries:
             if idx in ru_entries:
-                pairs.append({"zh": zh_entries[idx], "ru": ru_entries[idx]})
+                pairs.append({"zh": zh_entries[idx], "ru": ru_entries[idx], "src": f"srt:{zh_file.name}"})
     log.info(f"  SRT: {len(pairs):,} пар из {zh_dir}")
     return pairs
 
@@ -449,6 +464,67 @@ def filter_pairs(pairs: list[dict], cfg: dict) -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════════
+# Статистика по источникам
+# ═══════════════════════════════════════════════════════════
+
+def _print_source_stats(pairs: list[dict], title: str = "Источники"):
+    """Подробная статистика по каждому источнику данных."""
+    if not pairs:
+        return
+
+    counts = Counter(p.get("src", "unknown") for p in pairs)
+
+    table = Table(title=title)
+    table.add_column("Источник", style="cyan")
+    table.add_column("Кол-во пар", justify="right", style="green")
+    table.add_column("% от всех", justify="right", style="yellow")
+    table.add_column("Ср. ZH", justify="right")
+    table.add_column("Ср. RU", justify="right")
+
+    total = len(pairs)
+
+    # Группируем пары по источнику для средних длин
+    by_src: dict[str, list[dict]] = {}
+    for p in pairs:
+        src = p.get("src", "unknown")
+        by_src.setdefault(src, []).append(p)
+
+    for src, count in counts.most_common():
+        pct = count / total * 100
+        src_pairs = by_src[src]
+        avg_zh = sum(len(p["zh"]) for p in src_pairs) / len(src_pairs)
+        avg_ru = sum(len(p["ru"]) for p in src_pairs) / len(src_pairs)
+        table.add_row(src, f"{count:,}", f"{pct:.1f}%", f"{avg_zh:.0f}", f"{avg_ru:.0f}")
+
+    table.add_section()
+    avg_zh_all = sum(len(p["zh"]) for p in pairs) / total
+    avg_ru_all = sum(len(p["ru"]) for p in pairs) / total
+    table.add_row("[bold]ИТОГО", f"[bold]{total:,}", "[bold]100%", f"[bold]{avg_zh_all:.0f}", f"[bold]{avg_ru_all:.0f}")
+
+    console.print(table)
+
+
+def _print_stats(train: list, eval_data: list):
+    """Общая + источниковая статистика."""
+    table = Table(title="Итого")
+    table.add_column("", style="bold")
+    table.add_column("Кол-во", justify="right")
+    table.add_row("Train", f"{len(train):,}")
+    table.add_row("Eval", f"{len(eval_data):,}")
+    table.add_row("Всего", f"{len(train) + len(eval_data):,}")
+    if train:
+        avg_zh = sum(len(p["zh"]) for p in train) / len(train)
+        avg_ru = sum(len(p["ru"]) for p in train) / len(train)
+        table.add_row("Ср. длина ZH", f"{avg_zh:.0f} символов")
+        table.add_row("Ср. длина RU", f"{avg_ru:.0f} символов")
+    console.print(table)
+
+    # Детальная статистика по источникам
+    all_data = train + eval_data
+    _print_source_stats(all_data, title="Статистика по источникам")
+
+
+# ═══════════════════════════════════════════════════════════
 # Главная: скачать + собрать все данные
 # ═══════════════════════════════════════════════════════════
 
@@ -458,20 +534,31 @@ def download_all(cfg: dict) -> tuple[list, list]:
     limits = get(cfg, "data", "limits", default={})
     all_pairs = []
 
+    # Трекинг: сколько пар от каждого источника до фильтрации
+    source_counts_raw: dict[str, int] = {}
+
     console.rule("[bold green]Скачивание датасетов")
 
     # Автоматические датасеты
     if sources.get("opus100", True):
-        all_pairs.extend(download_opus100(limits.get("opus100", 1_000_000)))
+        pairs = download_opus100(limits.get("opus100", 1_000_000))
+        source_counts_raw["opus100"] = len(pairs)
+        all_pairs.extend(pairs)
 
     if sources.get("opensubtitles", True):
-        all_pairs.extend(download_opensubtitles(limits.get("opensubtitles", 500_000)))
+        pairs = download_opensubtitles(limits.get("opensubtitles", 500_000))
+        source_counts_raw["opensubtitles"] = len(pairs)
+        all_pairs.extend(pairs)
 
     if sources.get("un_corpus", True):
-        all_pairs.extend(download_un_corpus(limits.get("un_corpus", 500_000)))
+        pairs = download_un_corpus(limits.get("un_corpus", 500_000))
+        source_counts_raw["un_corpus"] = len(pairs)
+        all_pairs.extend(pairs)
 
     if sources.get("tatoeba", True):
-        all_pairs.extend(download_tatoeba(limits.get("tatoeba", 50_000)))
+        pairs = download_tatoeba(limits.get("tatoeba", 50_000))
+        source_counts_raw["tatoeba"] = len(pairs)
+        all_pairs.extend(pairs)
 
     # Свои файлы (JSONL / TMX / XML / CSV)
     custom = get(cfg, "data", "custom_files", default=[])
@@ -479,7 +566,9 @@ def download_all(cfg: dict) -> tuple[list, list]:
         console.rule("[bold cyan]Свои файлы")
         for fpath in custom:
             if Path(fpath).exists():
-                all_pairs.extend(convert_file(fpath))
+                pairs = convert_file(fpath)
+                source_counts_raw[f"custom:{Path(fpath).name}"] = len(pairs)
+                all_pairs.extend(pairs)
             else:
                 log.warning(f"  Файл не найден: {fpath}")
 
@@ -488,7 +577,22 @@ def download_all(cfg: dict) -> tuple[list, list]:
     srt_ru = get(cfg, "data", "srt_ru_dir", default="")
     if srt_zh and srt_ru and Path(srt_zh).exists() and Path(srt_ru).exists():
         console.rule("[bold cyan]SRT данные")
-        all_pairs.extend(collect_srt_pairs(srt_zh, srt_ru))
+        pairs = collect_srt_pairs(srt_zh, srt_ru)
+        source_counts_raw["srt"] = len(pairs)
+        all_pairs.extend(pairs)
+
+    # ── Сводка до фильтрации ──
+    console.rule("[bold cyan]Скачано (до фильтрации)")
+    dl_table = Table(title="Скачивание: результат")
+    dl_table.add_column("Источник", style="cyan")
+    dl_table.add_column("Скачано пар", justify="right", style="green")
+    dl_table.add_column("Статус", style="bold")
+    for src, count in source_counts_raw.items():
+        status = "✅" if count > 0 else "❌ пусто"
+        dl_table.add_row(src, f"{count:,}", status)
+    dl_table.add_section()
+    dl_table.add_row("[bold]ИТОГО", f"[bold]{len(all_pairs):,}", "")
+    console.print(dl_table)
 
     # Фильтрация
     console.rule("[bold yellow]Фильтрация")
@@ -516,25 +620,10 @@ def download_all(cfg: dict) -> tuple[list, list]:
     save_jsonl(train_data, train_path)
     save_jsonl(eval_data, eval_path)
 
-    # Статистика
+    # Статистика (после фильтрации, с разбивкой по источникам)
     _print_stats(train_data, eval_data)
 
     return train_data, eval_data
-
-
-def _print_stats(train: list, eval_data: list):
-    table = Table(title="Итого")
-    table.add_column("", style="bold")
-    table.add_column("Кол-во", justify="right")
-    table.add_row("Train", f"{len(train):,}")
-    table.add_row("Eval", f"{len(eval_data):,}")
-    table.add_row("Всего", f"{len(train) + len(eval_data):,}")
-    if train:
-        avg_zh = sum(len(p["zh"]) for p in train) / len(train)
-        avg_ru = sum(len(p["ru"]) for p in train) / len(train)
-        table.add_row("Ср. длина ZH", f"{avg_zh:.0f} символов")
-        table.add_row("Ср. длина RU", f"{avg_ru:.0f} символов")
-    console.print(table)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -612,8 +701,12 @@ def train(cfg: dict):
         return inp
 
     tokenizer.src_lang = src_lang
-    train_ds = Dataset.from_list(train_data).map(tokenize, batched=True, batch_size=1000, remove_columns=["zh", "ru"], desc="Tokenize train")
-    eval_ds = Dataset.from_list(eval_data).map(tokenize, batched=True, batch_size=1000, remove_columns=["zh", "ru"], desc="Tokenize eval")
+    # Убираем поле src перед токенизацией (оно не нужно для обучения)
+    remove_cols = ["zh", "ru"]
+    if "src" in train_data[0]:
+        remove_cols.append("src")
+    train_ds = Dataset.from_list(train_data).map(tokenize, batched=True, batch_size=1000, remove_columns=remove_cols, desc="Tokenize train")
+    eval_ds = Dataset.from_list(eval_data).map(tokenize, batched=True, batch_size=1000, remove_columns=remove_cols, desc="Tokenize eval")
 
     def compute_metrics(pred):
         preds, labels = pred.predictions, pred.label_ids
