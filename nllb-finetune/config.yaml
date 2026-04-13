@@ -80,7 +80,7 @@ generation:
 data:
   train_path: "data/train_all.jsonl"
   eval_path: "data/eval.jsonl"
-  total_limit: 5000
+  total_limit: 500000
 
   sources:
     opus100: true
