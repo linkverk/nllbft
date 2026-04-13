@@ -98,86 +98,114 @@ def download_opus100(limit: int = 1_000_000) -> list[dict]:
     from datasets import load_dataset
     log.info(f"[1/4] OPUS-100 (лимит {limit:,})...")
     pairs = []
-    try:
-        ds = load_dataset("opus100", "zh-ru", split="train", trust_remote_code=True)
-        for item in tqdm(ds, desc="  OPUS-100", total=min(limit, len(ds))):
-            if len(pairs) >= limit:
-                break
-            t = item.get("translation", item)
-            zh, ru = t.get("zh", ""), t.get("ru", "")
-            if zh and ru:
-                pairs.append({"zh": zh, "ru": ru})
-    except Exception as e:
-        log.warning(f"  OPUS-100 ошибка: {e}")
+
+    # OPUS-100 использует конфиг "ru-zh" (не "zh-ru")
+    configs_to_try = [
+        ("Helsinki-NLP/opus-100", "ru-zh"),
+        ("Helsinki-NLP/opus-100", "zh-en"),  # fallback через en
+    ]
+
+    for ds_name, subset in configs_to_try:
+        if pairs:
+            break
+        try:
+            ds = load_dataset(ds_name, subset, split="train")
+            for item in tqdm(ds, desc="  OPUS-100", total=min(limit, len(ds))):
+                if len(pairs) >= limit:
+                    break
+                t = item.get("translation", item)
+                # Ключи зависят от конфига
+                zh = t.get("zh", t.get("zh_cn", ""))
+                ru = t.get("ru", "")
+                if zh and ru:
+                    pairs.append({"zh": zh, "ru": ru})
+        except Exception as e:
+            log.debug(f"  {ds_name}/{subset}: {e}")
+            continue
+
     log.info(f"  OPUS-100: {len(pairs):,} пар")
     return pairs
 
 
-def download_opensubtitles(limit: int = 500_000) -> list[dict]:
+def download_opensubtitles(limit: int = 5_000_000) -> list[dict]:
     """OpenSubtitles: разговорный стиль, фильмы/сериалы."""
     from datasets import load_dataset
     log.info(f"[2/4] OpenSubtitles (лимит {limit:,})...")
     pairs = []
-    try:
-        # streaming=True чтобы не скачивать весь датасет (~5M)
-        ds = load_dataset(
-            "Helsinki-NLP/open_subtitles",
-            lang1="zh_cn", lang2="ru",
-            split="train", streaming=True,
-            trust_remote_code=True,
-        )
-        for item in tqdm(ds, desc="  OpenSubs", total=limit):
-            if len(pairs) >= limit:
-                break
-            t = item.get("translation", {})
-            zh = t.get("zh_cn", "")
-            ru = t.get("ru", "")
-            if zh and ru and len(zh) > 2 and len(ru) > 2:
-                pairs.append({"zh": zh, "ru": ru})
-    except Exception as e:
-        log.warning(f"  OpenSubtitles ошибка: {e}")
-        log.info("  Попробуй: pip install datasets --upgrade")
+
+    # Попробовать разные форматы датасета
+    loaders = [
+        # Новый Parquet-формат
+        lambda: load_dataset("sentence-transformers/parallel-sentences-opensubtitles",
+                             "ru", split="train", streaming=True),
+        # Прямой OPUS формат
+        lambda: load_dataset("open_subtitles", lang1="ru", lang2="zh_cn",
+                             split="train", streaming=True),
+    ]
+
+    for loader in loaders:
+        if pairs:
+            break
+        try:
+            ds = loader()
+            for item in tqdm(ds, desc="  OpenSubs", total=limit):
+                if len(pairs) >= limit:
+                    break
+                # sentence-transformers формат
+                en = item.get("english", "")
+                non_en = item.get("non_english", "")
+                # OPUS формат
+                t = item.get("translation", {})
+                zh = t.get("zh_cn", t.get("zh", non_en if not en else ""))
+                ru = t.get("ru", en if not non_en else non_en)
+
+                # sentence-transformers: en + non_english(ru), нет прямого zh-ru
+                # Пропускаем если нет прямой пары
+                if zh and ru and len(zh) > 2 and len(ru) > 2:
+                    pairs.append({"zh": zh, "ru": ru})
+        except Exception as e:
+            log.debug(f"  OpenSubtitles loader ошибка: {e}")
+            continue
+
+    if not pairs:
+        log.warning("  OpenSubtitles: не удалось скачать. Скачай вручную с https://opus.nlpl.eu/")
+
     log.info(f"  OpenSubtitles: {len(pairs):,} пар")
     return pairs
 
 
-def download_un_corpus(limit: int = 500_000) -> list[dict]:
+def download_un_corpus(limit: int = 5_000_000) -> list[dict]:
     """UN Parallel Corpus: формальный, высокое качество."""
     from datasets import load_dataset
     log.info(f"[3/4] UN Corpus (лимит {limit:,})...")
     pairs = []
-    try:
-        ds = load_dataset(
-            "Helsinki-NLP/un_pc",
-            "zh-ru",
-            split="train",
-            streaming=True,
-            trust_remote_code=True,
-        )
-        for item in tqdm(ds, desc="  UN", total=limit):
-            if len(pairs) >= limit:
-                break
-            t = item.get("translation", item)
-            zh = t.get("zh", "")
-            ru = t.get("ru", "")
-            if zh and ru:
-                pairs.append({"zh": zh, "ru": ru})
-    except Exception as e:
-        log.warning(f"  UN Corpus ошибка: {e}")
-        # Fallback: попробовать другие имена датасета
-        for alt_name in ["un_pc", "yhavinga/un_pc"]:
-            try:
-                ds = load_dataset(alt_name, "zh-ru", split="train", streaming=True, trust_remote_code=True)
-                for item in ds:
-                    if len(pairs) >= limit:
-                        break
-                    t = item.get("translation", item)
-                    zh, ru = t.get("zh", ""), t.get("ru", "")
-                    if zh and ru:
-                        pairs.append({"zh": zh, "ru": ru})
-                break
-            except Exception:
-                continue
+
+    # UN Corpus: конфиг "ru-zh" (не "zh-ru")
+    configs_to_try = [
+        ("Helsinki-NLP/un_pc", "ru-zh"),
+        ("Helsinki-NLP/un_pc", "en-zh"),  # через en как pivot
+    ]
+
+    for ds_name, subset in configs_to_try:
+        if pairs:
+            break
+        try:
+            ds = load_dataset(ds_name, subset, split="train", streaming=True)
+            for item in tqdm(ds, desc="  UN", total=limit):
+                if len(pairs) >= limit:
+                    break
+                t = item.get("translation", item)
+                zh = t.get("zh", "")
+                ru = t.get("ru", "")
+                if zh and ru:
+                    pairs.append({"zh": zh, "ru": ru})
+        except Exception as e:
+            log.debug(f"  {ds_name}/{subset}: {e}")
+            continue
+
+    if not pairs:
+        log.warning("  UN Corpus: не удалось скачать. Скачай вручную с https://opus.nlpl.eu/")
+
     log.info(f"  UN Corpus: {len(pairs):,} пар")
     return pairs
 
@@ -187,17 +215,37 @@ def download_tatoeba(limit: int = 50_000) -> list[dict]:
     from datasets import load_dataset
     log.info(f"[4/4] Tatoeba (лимит {limit:,})...")
     pairs = []
-    try:
-        ds = load_dataset("tatoeba", lang1="zh", lang2="ru", split="train", trust_remote_code=True)
-        for item in ds:
-            if len(pairs) >= limit:
-                break
-            t = item.get("translation", item)
-            zh, ru = t.get("zh", ""), t.get("ru", "")
-            if zh and ru:
-                pairs.append({"zh": zh, "ru": ru})
-    except Exception as e:
-        log.warning(f"  Tatoeba ошибка: {e}")
+
+    configs_to_try = [
+        ("Helsinki-NLP/tatoeba_mt", "zho-rus"),
+        ("Helsinki-NLP/tatoeba_mt", "rus-zho"),
+    ]
+
+    for ds_name, subset in configs_to_try:
+        if pairs:
+            break
+        try:
+            ds = load_dataset(ds_name, subset, split="train")
+            for item in ds:
+                if len(pairs) >= limit:
+                    break
+                # tatoeba_mt формат: sourceString / targetString
+                src = item.get("sourceString", "")
+                tgt = item.get("targetString", "")
+                src_lang = item.get("sourceLang", subset.split("-")[0])
+                tgt_lang = item.get("targetLang", subset.split("-")[1])
+
+                if "zho" in src_lang:
+                    zh, ru = src, tgt
+                else:
+                    zh, ru = tgt, src
+
+                if zh and ru:
+                    pairs.append({"zh": zh, "ru": ru})
+        except Exception as e:
+            log.debug(f"  {ds_name}/{subset}: {e}")
+            continue
+
     log.info(f"  Tatoeba: {len(pairs):,} пар")
     return pairs
 
@@ -514,7 +562,7 @@ def train(cfg: dict):
 
     if torch.cuda.is_available():
         g = torch.cuda.get_device_properties(0)
-        log.info(f"GPU: {g.name} ({g.total_mem / 1e9:.1f} GB)")
+        log.info(f"GPU: {g.name} ({g.total_memory / 1e9:.1f} GB)")
 
     # --- Данные ---
     train_path = get(cfg, "data", "train_path", default="data/train.jsonl")
@@ -748,7 +796,7 @@ def _apply_gpu_profile(cfg: dict, gpu_flag: str) -> dict:
     if gpu_flag == "auto":
         if torch.cuda.is_available():
             name = torch.cuda.get_device_name(0).lower()
-            vram = torch.cuda.get_device_properties(0).total_mem / 1e9
+            vram = torch.cuda.get_device_properties(0).total_memory / 1e9
             if vram < 6:
                 gpu_flag = "rtx3050"
             else:
