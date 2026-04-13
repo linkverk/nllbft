@@ -78,7 +78,7 @@ generation:
 
 # ═══════════════════════════ ДАННЫЕ ═══════════════════════
 data:
-  train_path: "data/train.jsonl"
+  train_path: "data/train_all.jsonl"
   eval_path: "data/eval.jsonl"
 
   sources:
