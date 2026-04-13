@@ -78,19 +78,19 @@ generation:
 
 # ═══════════════════════════ ДАННЫЕ ═══════════════════════
 data:
-  train_path: "data/train_all.jsonl"
+  train_path: "data/train.jsonl"
   eval_path: "data/eval.jsonl"
 
   sources:
-    opus100: true
-    opensubtitles: true
+    opus100: false
+    opensubtitles: false
     un_corpus: true
-    tatoeba: true
+    tatoeba: false
 
   limits:
     opus100: 1000000       # 1M
     opensubtitles: 5000000 # 5M
-    un_corpus: 5000000     # 5M
+    un_corpus: 23000000     # 5M
     tatoeba: 50000
 
   filter:
